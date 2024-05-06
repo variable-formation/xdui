@@ -1,0 +1,9 @@
+/config.json
+/cards-bak/
+/cards/
+/cards.db
+/.idea/dataSources.xml
+/.idea/xdui-administration.iml
+/.idea/vcs.xml
+/.idea/sqldialects.xml
+/.idea/modules.xml
