@@ -46,15 +46,6 @@ func main() {
 		return
 	}
 
-	//// Set up the parameters for the database connection.
-	//sqlConfiguration := mysql.Config{
-	//	User:   config.MySQL_Username,
-	//	Passwd: config.MySQL_Password,
-	//	Net:    "tcp",
-	//	Addr:   "localhost:3306",
-	//	DBName: "discord_gacha",
-	//}
-
 	// Open a connection to the database.
 	db, err = sql.Open("sqlite3", "cards.db")
 	if err != nil {

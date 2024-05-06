@@ -1,15 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
 	"fmt"
 	"github.com/Necroforger/dgwidgets"
-
 	"github.com/bwmarrin/discordgo"
 	"log"
 	"os"
+	"sort"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"golang.org/x/text/language"
@@ -179,6 +181,91 @@ var commandHandlers = map[string]func(session *discordgo.Session, interaction *d
 			}
 		}
 	},
+	"daily": func(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
+		authorID := interaction.Member.User.ID
+		currentTimestamp := time.Now().Unix()
+		var databaseTimestamp int64
+		var credits int64
+
+		if !userIsRegistered(session, interaction) {
+			// https: //pkg.go.dev/github.com/bwmarrin/discordgo#Session.InteractionRespond
+			err := session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: "Hey! You aren't registered to play yet! Remember to use the command `/register` before trying to play!",
+				},
+			})
+			if err != nil {
+				return
+			}
+
+			return
+		}
+
+		// Perform a single row query in the database to retrieve the timestamp.
+		query := fmt.Sprintf(`SELECT timestamp FROM users WHERE id = %s;`, authorID)
+		err := db.QueryRow(query).Scan(&databaseTimestamp)
+		if err != nil {
+			log.Printf("%vERROR%v - COULD NOT RETRIEVE USER'S TIMESTAMP FROM DATABASE:\n\t%v", Red, Reset, err)
+			return
+		}
+
+		// Checking to see if the user is on cooldown or if it is just an outdated entry.
+		if currentTimestamp >= databaseTimestamp+int64(86400) {
+			// It was an outdated entry, so we should give the user their reward and place them on cooldown again.
+
+			// Updating the timestamp in the database so that the user can't use the command again for a certain amount of time.
+			query = fmt.Sprintf(`UPDATE users SET timestamp = %v WHERE id = %v;`, currentTimestamp, authorID)
+			result, err := db.Exec(query)
+			if err != nil {
+				log.Printf("%vERROR%v - COULD NOT UPDATE UNIX TIMESTAMP IN DATABASE: %v", Red, Reset, err)
+				return
+			}
+			log.Printf("%vSUCCESS%v - UPDATED USER COOLDOWN: %v", Green, Reset, result)
+
+			// Snagging the amount of credits so that they can be updated.
+			query := fmt.Sprintf(`SELECT credits FROM users WHERE id = %v;`, authorID)
+			err = db.QueryRow(query).Scan(&credits)
+			if err != nil {
+				log.Printf("%vERROR%v - COULD NOT GET CREDITS OF USER IN DATABASE: %v", Red, Reset, err)
+				return
+			}
+
+			// Updating the amount of credits in the database for the user.
+			query = fmt.Sprintf(`UPDATE users SET credits = %v WHERE id = %v;`, credits+int64(100), authorID)
+			result, err = db.Exec(query)
+			if err != nil {
+				log.Printf("%vERROR%v - COULD NOT UPDATE CREDITS IN DATABASE: %v", Red, Reset, err)
+				return
+			}
+			log.Printf("%vSUCCESS%v - UPDATED USER CREDITS: %v", Green, Reset, result)
+
+			// https: //pkg.go.dev/github.com/bwmarrin/discordgo#Session.InteractionRespond
+			err = session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: "Here's your daily reward of 100 credits!",
+				},
+			})
+			if err != nil {
+				return
+			}
+		} else {
+			// The user is actually on cooldown so we should let them know to comeback later.
+			// https: //pkg.go.dev/github.com/bwmarrin/discordgo#Session.InteractionRespond
+			err = session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: fmt.Sprintf("Come back on <t:%v:D> at <t:%v:T> to claim your daily reward!",
+						databaseTimestamp+int64(86400), databaseTimestamp+int64(86400)),
+				},
+			})
+			if err != nil {
+				return
+			}
+		}
+
+	},
 	"credits": func(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
 		var credits int64
 		authorID := interaction.Member.User.ID
@@ -216,6 +303,273 @@ var commandHandlers = map[string]func(session *discordgo.Session, interaction *d
 		})
 		if err != nil {
 			return
+		}
+	},
+	"characters": func(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
+		// https: //pkg.go.dev/github.com/bwmarrin/discordgo#Session.InteractionRespond
+		err := session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: strings.Join(charactersList(), ", "),
+			},
+		})
+		if err != nil {
+			return
+		}
+	},
+	"collection_list": func(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
+		authorID := interaction.Member.User.ID
+		var id string
+		var characterName string
+		var customName string
+		var evolution int8
+		var query string
+		// var webhookParams []discordgo.WebhookParams
+		var embeds []*discordgo.MessageEmbed
+
+		// Checking to make sure the user is registered.
+		if !userIsRegistered(session, interaction) {
+			// https: //pkg.go.dev/github.com/bwmarrin/discordgo#Session.InteractionRespond
+			err := session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: "Hey! You aren't registered to play yet! Remember to use the command `/register` before trying to play!",
+				},
+			})
+			if err != nil {
+				return
+			}
+
+			return
+		}
+
+		// I don't even know at this point. Check whether a character is specified or something.
+		if len(interaction.ApplicationCommandData().Options) == 0 {
+			query = fmt.Sprintf(`SELECT card_id, character, custom_name, evolution FROM collections WHERE user_id = %v;`, authorID)
+		} else {
+			if inArray(strings.Title(interaction.ApplicationCommandData().Options[0].StringValue()), charactersList()) {
+				query = fmt.Sprintf(`SELECT card_id, character, custom_name, evolution FROM collections WHERE user_id = %v AND character_name = "%v";`,
+					authorID, interaction.ApplicationCommandData().Options[0].StringValue())
+			} else {
+				// https: //pkg.go.dev/github.com/bwmarrin/discordgo#Session.InteractionRespond
+				err := session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+					Type: discordgo.InteractionResponseChannelMessageWithSource,
+					Data: &discordgo.InteractionResponseData{
+						Content: "I couldn't find a character with that name.",
+					},
+				})
+				if err != nil {
+					return
+				}
+			}
+
+		}
+
+		// Executing the query.
+		rows, err := db.Query(query)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("%vERROR%v - COULD NOT RETRIEVE CARDS FROM DATABASE:\n\t%v", Red, Reset, err)
+			return
+		}
+
+		// Creating a struct to hold query results.
+		type Card struct {
+			id            string
+			characterName string
+			customName    string
+			evolution     int8
+		}
+
+		// Making an slice of card structs to hold results.
+		var cards []Card
+
+		// Iterating over the results and appending to an array of cards.
+		for rows.Next() {
+			err := rows.Scan(&id, &characterName, &customName, &evolution)
+			if err != nil {
+				log.Printf("%vERROR%v - COULD NOT RETRIEVE CHARACTER FROM ROW:\n\t%v", Red, Reset, err)
+				return
+			}
+
+			var card Card
+			card.id = id
+			card.characterName = characterName
+			card.customName = customName
+			card.evolution = evolution
+
+			cards = append(cards, card)
+		}
+
+		if len(cards) == 0 {
+			// If there were no rows returned, let the user know that they don't have any cards.
+			// https: //pkg.go.dev/github.com/bwmarrin/discordgo#Session.InteractionRespond
+			err := session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: "It looks like you don't have any cards that match that criteria!",
+				},
+			})
+			if err != nil {
+				return
+			}
+
+			return
+		}
+
+		// Sorting the slice.
+		sort.SliceStable(cards[:], func(i, j int) bool {
+			return cards[i].characterName < cards[j].characterName
+		})
+
+		// SUPER funky shit to chop up array.
+		var chunkedCards [][]Card
+		chunkSize := 25
+
+		for i := 0; i < len(cards); i += chunkSize {
+			end := i + chunkSize
+
+			if end > len(cards) {
+				end = len(cards)
+			}
+
+			chunkedCards = append(chunkedCards, cards[i:end])
+		}
+
+		// Printing the results to the user. Need to clean it up...
+		for _, values := range chunkedCards {
+			buffer := new(bytes.Buffer)
+			writer := tabwriter.NewWriter(buffer, 0, 0, 4, ' ', 0)
+			fmt.Fprintln(writer, "Character:\tCard Name:\tEvolution:")
+
+			for _, value := range values {
+				// content += fmt.Sprintf("%-10s\t%12s\n", value.characterName, value.customName)
+				_, err := fmt.Fprintf(writer, "%v\t%v\t%v\n", value.characterName, value.customName, value.evolution)
+				if err != nil {
+					log.Println(err)
+				}
+			}
+
+			writer.Flush()
+
+			content := "```" + buffer.String() + "```"
+
+			embeds = append(embeds, &discordgo.MessageEmbed{
+				Description: content,
+			})
+		}
+
+		// https: //pkg.go.dev/github.com/bwmarrin/discordgo#Session.InteractionRespond
+		err = session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Now listing cards...",
+			},
+		})
+		if err != nil {
+			return
+		}
+
+		paginator := dgwidgets.NewPaginator(session, interaction.ChannelID)
+
+		for _, embed := range embeds {
+			paginator.Add(embed)
+		}
+
+		paginator.SetPageFooters()
+
+		paginator.Widget.Timeout = time.Minute * 5
+
+		paginator.Widget.UserWhitelist = append(paginator.Widget.UserWhitelist, authorID)
+
+		paginator.Spawn()
+	},
+	"collection_amount": func(session *discordgo.Session, interaction *discordgo.InteractionCreate) {
+		var query string
+		var userAmount int64
+		var totalAmount int64
+
+		authorID := interaction.Member.User.ID
+
+		printer := message.NewPrinter(language.English)
+
+		// Checking to make sure the user is registered.
+		if !userIsRegistered(session, interaction) {
+			// https: //pkg.go.dev/github.com/bwmarrin/discordgo#Session.InteractionRespond
+			err := session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: "Hey! You aren't registered to play yet! Remember to use the command `/register` before trying to play!",
+				},
+			})
+			if err != nil {
+				return
+			}
+
+			return
+		}
+
+		// I don't even know at this point. Check whether a character is specified or something.
+		if len(interaction.ApplicationCommandData().Options) == 0 {
+			query = fmt.Sprintf(`SELECT COUNT(DISTINCT card_id) FROM collections WHERE user_id = %v;`, authorID)
+		} else {
+			if inArray(strings.Title(interaction.ApplicationCommandData().Options[0].StringValue()), charactersList()) {
+				query = fmt.Sprintf(`SELECT COUNT(DISTINCT card_id) FROM collections WHERE user_id = %v AND character = "%v";`,
+					authorID, strings.Title(interaction.ApplicationCommandData().Options[0].StringValue()))
+			} else {
+				// https: //pkg.go.dev/github.com/bwmarrin/discordgo#Session.InteractionRespond
+				err := session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+					Type: discordgo.InteractionResponseChannelMessageWithSource,
+					Data: &discordgo.InteractionResponseData{
+						Content: "I couldn't find a character with that name.",
+					},
+				})
+				if err != nil {
+					return
+				}
+			}
+		}
+
+		err := db.QueryRow(query).Scan(&userAmount)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("%vERROR%v - COULD NOT RETRIEVE AMOUNT OF CARDS FROM DATABASE:\n\t%v", Red, Reset, err)
+			return
+		}
+
+		// Grabbing the amount of those total cards in the cards table.
+		if len(interaction.ApplicationCommandData().Options) == 0 {
+			query = `SELECT COUNT(DISTINCT card_id) FROM cards;`
+		} else {
+			query = fmt.Sprintf(`SELECT COUNT(DISTINCT card_id) FROM cards WHERE character = "%v";`,
+				interaction.ApplicationCommandData().Options[0].StringValue())
+		}
+
+		err = db.QueryRow(query).Scan(&totalAmount)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("%vERROR%v - COULD NOT RETRIEVE AMOUNT OF CARDS FROM DATABASE:\n\t%v", Red, Reset, err)
+			return
+		}
+
+		if len(interaction.ApplicationCommandData().Options) == 0 {
+			err = session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: printer.Sprintf("You have currently collected %d out of %d cards!", userAmount, totalAmount),
+				},
+			})
+			if err != nil {
+				return
+			}
+		} else {
+			err = session.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: printer.Sprintf("You have currently collected %d out of %d cards of %s!",
+						userAmount, totalAmount, strings.Title(interaction.ApplicationCommandData().Options[0].StringValue())),
+				},
+			})
+			if err != nil {
+				return
+			}
 		}
 	},
 	"single_pull": func(session *discordgo.Session, interaction *discordgo.InteractionCreate) {

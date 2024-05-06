@@ -23,9 +23,47 @@ var commands = []*discordgo.ApplicationCommand{
 		DMPermission: &dmPermission,
 	},
 	{
+		Name:         "daily",
+		Description:  "This command claims your daily credits!",
+		DMPermission: &dmPermission,
+	},
+	{
 		Name:         "credits",
 		Description:  "This command tells you how many credits you have.",
 		DMPermission: &dmPermission,
+	},
+	{
+		Name:         "characters",
+		Description:  "This command lists the available gacha pools to pull from.",
+		DMPermission: &dmPermission,
+	},
+	{
+		Name:         "collection_list",
+		Description:  "This command lists the cards in your collection.",
+		DMPermission: &dmPermission,
+
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionString,
+				Name:        "character",
+				Description: "The name of the character you wish to list.",
+				Required:    false,
+			},
+		},
+	},
+	{
+		Name:         "collection_amount",
+		Description:  "This command lists the amount of the cards in your collection.",
+		DMPermission: &dmPermission,
+
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionString,
+				Name:        "character",
+				Description: "The name of the character you wish to list.",
+				Required:    false,
+			},
+		},
 	},
 	{
 		Name:         "single_pull",
